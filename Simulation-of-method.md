@@ -151,7 +151,7 @@ Plot code
 </summary>
 
 ``` r
-sim_results_null %>%
+p <- sim_results_null %>%
   mutate(att_cor = round(att_cor / 5, 2) * 5) %>%
   group_by(a, b, att_cor) %>%
   filter(n() > 100) %>%
@@ -172,8 +172,6 @@ sim_results_null %>%
     ## `summarise()` has grouped output by 'a', 'b'. You can override using the
     ## `.groups` argument.
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-2-1.png)<!-- -->
-
 </details>
 
 # Type II error rates
@@ -190,7 +188,7 @@ Plot code
 </summary>
 
 ``` r
-sim_results_not_null %>%
+p <- sim_results_not_null %>%
   mutate(att_cor = round(att_cor / 5, 2) * 5) %>%
   group_by(a, b, att_cor) %>%
   filter(n() > 100) %>%
@@ -212,7 +210,6 @@ sim_results_not_null %>%
     ## `summarise()` has grouped output by 'a', 'b'. You can override using the
     ## `.groups` argument.
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
 </details>
 
 ## Bias in estimates
@@ -233,7 +230,7 @@ estimates_summarised <- sim_results_not_null %>%
   filter(n() > 100) %>%
   summarise(est = mean(diff), .groups = "drop")
 
-estimates_summarised %>%
+p <- estimates_summarised %>%
   ggplot(aes(x = att_cor, y = est, fill = a)) +
   geom_col(position = position_dodge()) +
   facet_wrap(vars(b)) +
@@ -243,8 +240,6 @@ estimates_summarised %>%
        x = "Correlation between attitudes over time", y = "Estimate for b")
 ```
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-4-1.png)<!-- -->
-
 </details>
 <details>
 <summary>
@@ -252,7 +247,7 @@ Plot code
 </summary>
 
 ``` r
-estimates_summarised %>%
+p <- estimates_summarised %>%
   group_by(a, b) %>%
   summarise(est = mean(est), .groups = "drop") %>%
   mutate(bias = est / b - 1) %>%
@@ -264,8 +259,6 @@ estimates_summarised %>%
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
-
 </details>
 <details>
 <summary>
@@ -273,7 +266,7 @@ Plot code
 </summary>
 
 ``` r
-estimates_summarised %>%
+p <- estimates_summarised %>%
   group_by(b, att_cor) %>%
   summarise(est = mean(est), .groups = "drop") %>%
   mutate(bias = est / b - 1) %>%
@@ -284,7 +277,5 @@ estimates_summarised %>%
        x = "Correlation between attitudes over time", y = "b", fill = "Bias in %", 
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
-
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
 
 </details>

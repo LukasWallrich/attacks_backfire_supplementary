@@ -114,7 +114,7 @@ Halving the alpha level to .025 leads to a Type I error rate below the desired 5
   <summary>Plot code</summary>
 
 ```{r}
-sim_results_null %>%
+p <- sim_results_null %>%
   mutate(att_cor = round(att_cor / 5, 2) * 5) %>%
   group_by(a, b, att_cor) %>%
   filter(n() > 100) %>%
@@ -134,6 +134,8 @@ sim_results_null %>%
 
 </details>
 
+`r print(p)`
+
 # Type II error rates
 
 Note that we cannot plausibly estimate the power of the multi-level regression, since we have no basis to estimate interclass correlations. It will be somewhere between a linear model with 2400 participants (the number of participants) and one with 140 participants (the number of clusters). To get a sense of power, we simulated a sample size of 500.
@@ -142,7 +144,7 @@ Note that we cannot plausibly estimate the power of the multi-level regression, 
   <summary>Plot code</summary>
 
 ```{r}
-sim_results_not_null %>%
+p <- sim_results_not_null %>%
   mutate(att_cor = round(att_cor / 5, 2) * 5) %>%
   group_by(a, b, att_cor) %>%
   filter(n() > 100) %>%
@@ -162,6 +164,8 @@ sim_results_not_null %>%
 ```
 </details>
 
+`r print(p)`
+
 ## Bias in estimates
 
 Overall, the estimates for b tend to be biased towards 0 (i.e. underestimated), yet the bias is small unless a and b are similar in value or attitudes are unstable over time. The figures below provide detail.
@@ -174,7 +178,7 @@ estimates_summarised <- sim_results_not_null %>%
   filter(n() > 100) %>%
   summarise(est = mean(diff), .groups = "drop")
 
-estimates_summarised %>%
+p <- estimates_summarised %>%
   ggplot(aes(x = att_cor, y = est, fill = a)) +
   geom_col(position = position_dodge()) +
   facet_wrap(vars(b)) +
@@ -186,11 +190,13 @@ estimates_summarised %>%
 
 </details>
 
+`r print(p)`
+
 <details>
   <summary>Plot code</summary>
 
 ```{r}
-estimates_summarised %>%
+p <- estimates_summarised %>%
   group_by(a, b) %>%
   summarise(est = mean(est), .groups = "drop") %>%
   mutate(bias = est / b - 1) %>%
@@ -204,12 +210,14 @@ estimates_summarised %>%
 
 </details>
 
+`r print(p)`
+
 <details>
   <summary>Plot code</summary>
 
 ```{r}
 
-estimates_summarised %>%
+p <- estimates_summarised %>%
   group_by(b, att_cor) %>%
   summarise(est = mean(est), .groups = "drop") %>%
   mutate(bias = est / b - 1) %>%
@@ -223,4 +231,4 @@ estimates_summarised %>%
 
 </details>
 
-
+`r print(p)`
