@@ -8,10 +8,13 @@ different from its usual formulation - to assess whether violence
 against refugees influences public attitudes.
 
 Below we show a simulation that might help to clarify the model and
-helps to establish its robustness. The parameters are: - a: the effect
-of attitudes on violence - b: the effect of violence on attitudes -
-noise: the variations in attitude change over time, not explained by
-co-variates.
+helps to establish its robustness - see the article for a detailed
+description and derivation from a causal diagram. The parameters are:
+
+-   a: the effect of attitudes on violence
+-   b: the effect of violence on attitudes
+-   noise: the variations in attitude change over time, not explained by
+    co-variates.
 
 <details>
 <summary>
@@ -214,6 +217,8 @@ p <- sim_results_not_null %>%
 
 </details>
 
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
+
 ## Bias in estimates
 
 Overall, the estimates for b tend to be biased towards 0
@@ -243,6 +248,9 @@ p <- estimates_summarised %>%
 ```
 
 </details>
+
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-7-1.png)<!-- -->
+
 <details>
 <summary>
 Plot code
@@ -262,6 +270,9 @@ p <- estimates_summarised %>%
 ```
 
 </details>
+
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-9-1.png)<!-- -->
+
 <details>
 <summary>
 Plot code
@@ -275,9 +286,11 @@ p <- estimates_summarised %>%
   ggplot(aes(x = att_cor, y = b, fill = bias * 100)) +
   geom_tile(lwd = 1.5, linetype = 1) +
   scale_fill_gradient2(low = "pink", mid = "green", high = "red") +
-  labs(title = "Bias in estimates for b depending on a", subtitle = "Averaged over all values for a", 
+  labs(title = "Bias in estimates for b depending on stability of attitudes", subtitle = "Averaged over all values for a", 
        x = "Correlation between attitudes over time", y = "b", fill = "Bias in %", 
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
 
 </details>
+
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-11-1.png)<!-- -->
