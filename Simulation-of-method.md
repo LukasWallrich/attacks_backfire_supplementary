@@ -174,6 +174,8 @@ p <- sim_results_null %>%
 
 </details>
 
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
+
 # Type II error rates
 
 Note that we cannot plausibly estimate the power of the multi-level

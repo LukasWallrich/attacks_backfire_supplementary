@@ -134,7 +134,10 @@ p <- sim_results_null %>%
 
 </details>
 
-`r print(p)`
+```{r, echo=FALSE}
+p
+```
+
 
 # Type II error rates
 
