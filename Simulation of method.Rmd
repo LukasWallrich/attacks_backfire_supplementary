@@ -12,7 +12,15 @@ Below we show a simulation that might help to clarify the model and helps to est
 - b: the effect of violence on attitudes
 - noise: the variations in attitude change over time, not explained by co-variates.
 
+<details>
+  <summary>Simulation code</summary>
 
+```{r}
+if (!require(pacman)) install.packages("pacman")
+pacman::p_load(faux, purrr, ggplot2, dplyr, furrr)
+
+```
+  
 ```{r simulate_results, cache=TRUE}
 if (!require(pacman)) install.packages("pacman")
 pacman::p_load(faux, purrr, ggplot2, dplyr, furrr)
@@ -94,11 +102,16 @@ sim_results_not_null <- params %>%
   })
 ```
 
+</details>
+
 # Type I error rates
 
 When b is set to 0, i.e. when no effect of attacks on attitudes is assumed, the simulation can be used to estimate potential Type I error rates. This shows that the test is generally too liberal and that the Type I error rate can be substantially inflated if attitudes are unstable over time or if the correlation between municipality-level attitudes and subsequent attacks is large.
 
 Halving the alpha level to .025 leads to a Type I error rate below the desired 5% for the most likely parameter combinations.
+
+<details>
+  <summary>Plot code</summary>
 
 ```{r}
 sim_results_null %>%
@@ -119,9 +132,14 @@ sim_results_null %>%
   )
 ```
 
+</details>
+
 # Type II error rates
 
 Note that we cannot plausibly estimate the power of the multi-level regression, since we have no basis to estimate interclass correlations. It will be somewhere between a linear model with 2400 participants (the number of participants) and one with 140 participants (the number of clusters). To get a sense of power, we simulated a sample size of 500.
+
+<details>
+  <summary>Plot code</summary>
 
 ```{r}
 sim_results_not_null %>%
@@ -142,11 +160,13 @@ sim_results_not_null %>%
   ) +
   facet_wrap(vars(b))
 ```
+</details>
 
 ## Bias in estimates
 
 Overall, the estimates for b tend to be biased towards 0 (i.e. underestimated), yet the bias is small unless a and b are similar in value or attitudes are unstable over time. The figures below provide detail.
-
+<details>
+  <summary>Plot code</summary>
 ```{r}
 estimates_summarised <- sim_results_not_null %>%
   mutate(att_cor = round(att_cor / 5, 2) * 5) %>%
@@ -164,6 +184,11 @@ estimates_summarised %>%
        x = "Correlation between attitudes over time", y = "Estimate for b")
 ```
 
+</details>
+
+<details>
+  <summary>Plot code</summary>
+
 ```{r}
 estimates_summarised %>%
   group_by(a, b) %>%
@@ -176,6 +201,12 @@ estimates_summarised %>%
        x = "a", y = "b", fill = "Bias in %", 
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
+
+</details>
+
+<details>
+  <summary>Plot code</summary>
+
 ```{r}
 
 estimates_summarised %>%
@@ -189,5 +220,7 @@ estimates_summarised %>%
        x = "Correlation between attitudes over time", y = "b", fill = "Bias in %", 
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
-```
+
+</details>
+
 

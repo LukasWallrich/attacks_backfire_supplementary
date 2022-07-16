@@ -13,6 +13,21 @@ of attitudes on violence - b: the effect of violence on attitudes -
 noise: the variations in attitude change over time, not explained by
 co-variates.
 
+<details>
+<summary>
+Simulation code
+</summary>
+
+``` r
+if (!require(pacman)) install.packages("pacman")
+```
+
+    ## Loading required package: pacman
+
+``` r
+pacman::p_load(faux, purrr, ggplot2, dplyr, furrr)
+```
+
 ``` r
 if (!require(pacman)) install.packages("pacman")
 ```
@@ -116,6 +131,8 @@ sim_results_not_null <- params %>%
   })
 ```
 
+</details>
+
 # Type I error rates
 
 When b is set to 0, i.e. when no effect of attacks on attitudes is
@@ -127,6 +144,11 @@ attitudes and subsequent attacks is large.
 
 Halving the alpha level to .025 leads to a Type I error rate below the
 desired 5% for the most likely parameter combinations.
+
+<details>
+<summary>
+Plot code
+</summary>
 
 ``` r
 sim_results_null %>%
@@ -150,7 +172,9 @@ sim_results_null %>%
     ## `summarise()` has grouped output by 'a', 'b'. You can override using the
     ## `.groups` argument.
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-1-1.png)<!-- -->
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-2-1.png)<!-- -->
+
+</details>
 
 # Type II error rates
 
@@ -159,6 +183,11 @@ regression, since we have no basis to estimate interclass correlations.
 It will be somewhere between a linear model with 2400 participants (the
 number of participants) and one with 140 participants (the number of
 clusters). To get a sense of power, we simulated a sample size of 500.
+
+<details>
+<summary>
+Plot code
+</summary>
 
 ``` r
 sim_results_not_null %>%
@@ -183,7 +212,8 @@ sim_results_not_null %>%
     ## `summarise()` has grouped output by 'a', 'b'. You can override using the
     ## `.groups` argument.
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-2-1.png)<!-- -->
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
+</details>
 
 ## Bias in estimates
 
@@ -191,6 +221,10 @@ Overall, the estimates for b tend to be biased towards 0
 (i.e. underestimated), yet the bias is small unless a and b are similar
 in value or attitudes are unstable over time. The figures below provide
 detail.
+<details>
+<summary>
+Plot code
+</summary>
 
 ``` r
 estimates_summarised <- sim_results_not_null %>%
@@ -209,7 +243,13 @@ estimates_summarised %>%
        x = "Correlation between attitudes over time", y = "Estimate for b")
 ```
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-4-1.png)<!-- -->
+
+</details>
+<details>
+<summary>
+Plot code
+</summary>
 
 ``` r
 estimates_summarised %>%
@@ -224,7 +264,13 @@ estimates_summarised %>%
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-4-1.png)<!-- -->
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
+
+</details>
+<details>
+<summary>
+Plot code
+</summary>
 
 ``` r
 estimates_summarised %>%
@@ -239,5 +285,6 @@ estimates_summarised %>%
        caption = "Positive bias (orange) indicates that b is overestimated, \n while negative bias (pink) indicates that it is underestimated")
 ```
 
-![](Simulation-of-method_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
-\`\`\`
+![](Simulation-of-method_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
+
+</details>
