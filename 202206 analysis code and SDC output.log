@@ -1,0 +1,2001 @@
+=========================================================================
+Log Path: ../Output/output_Lukas.log
+Program Path: C:/Users/ra000005/ownCloud/Home/syntax_2022_WIP v2.r
+Working Directory: C:/Users/ra000005/ownCloud/Home
+User Name: ra000005
+R Version: 4.1.2 (2021-11-01)
+Machine: RA-01-003 x86-64
+Operating System: Windows 10 x64 build 17763
+Base Packages: grid stats graphics grDevices utils datasets methods
+               base 
+Other Packages: lubridate_1.8.0 timesaveR_0.0.2.9002 car_3.0-12 carData_3.0-5 forcats_0.5.1
+                stringr_1.4.0 dplyr_1.0.7 purrr_0.3.4 readr_2.1.1 tidyr_1.1.4
+                tibble_3.1.6 ggplot2_3.3.5 tidyverse_1.3.1 remotes_2.4.2 parameters_0.16.0
+                semTools_0.5-5 lavaan.survey_1.1.3.1 lavaan_0.6-9 magrittr_2.0.1 survey_4.1-1
+                survival_3.2-13 srvyr_1.1.0 lmerTest_3.1-3 lme4_1.1-27.1 Matrix_1.3-4
+                logr_1.2.8 
+Log Start Time: 2022-06-15 17:34:24
+=========================================================================
+
+> library(logr)
+> log_open(file_name = "../Output/output_Lukas.log", logdir = FALSE, show_notes = FALSE)
+> log_code()
+> 
+> required_packages <- c("lme4", "lmerTest", "srvyr", "survey", "magrittr", "lavaan",
+>                        "lavaan.survey", "semTools", "parameters", "remotes", "tidyverse", "car")
+> 
+> for (i in seq_along(required_packages)) {
+>   if(!require(required_packages[i], character.only = TRUE)) install.packages(required_packages[i])
+>   library(required_packages[i], character.only = TRUE)
+> }
+> 
+> if(!require(timesaveR)) remotes::install_local("timesaveR-master.zip")
+> library(timesaveR)
+> library(lubridate)
+> 
+> source("helper_functions2022.r")
+> 
+> ##----------------------------------------------------------------
+> ##                        1: Data import                         -
+> ##----------------------------------------------------------------
+> 
+>   geo_data <- read_csv("../Input/User/geo_data.csv")
+>   geo_data_einwohner <- read_csv("../Input/User/geo_data_2.csv") %>% 
+>     filter(type == 60) %>% mutate(einwohner = as.numeric(str_remove_all(einwohner, " "))) %>% 
+>     select(-type) %>% rename(longitude = lon, latitude = lat)
+>   
+>   arvig <- read_csv("../Input/User/arvig_data.csv")
+> 
+>   allbus_all <- haven::read_dta("../Input/GESIS/Wallrich_5260_2022.dta")
+>   
+>   ##----------------------------------------------------------------
+>   ##                        1a: AGS matching -
+>   ##----------------------------------------------------------------  
+>   
+>   #This sections is about matching the different AGS sources and county names -
+>   #since the sampling AGS in Allbus are privacy sensitive, this needed to be anonymised
+>   
+>   arvig$ags <- str_sub(arvig$community_id, 1, 5) 
+>   allbus_all$ags <- allbus_all$kreis15s
+>   
+##Pascal: Names and identifiers of municipalities are censored.
+>   geo_data <- geo_data %>% filter(name_unique == "XXXXXXX") %>% 
+>     mutate(ags = "XXXXXXX") %>% bind_rows(geo_data)
+>     
+>   ## rows censored
+>   
+>   #Add coordinates to incomplete AGS
+>   x <- arvig %>% 
+>     filter(ags == "XXXXXXX") %>% 
+>     summarise(lat = mean(latitude), lon = mean(longitude))
+>   
+>   geo_data[geo_data$ags=="XXXXXXX",]$lat <- x$lat
+>   geo_data[geo_data$ags=="XXXXXXX",]$lon <- x$lon
+>   
+>   #Align names
+>   newspapers %<>% mutate(Landkreis = case_when(
+>   ## rows censored
+>     TRUE ~ Landkreis
+>   ))
+>   
+> 
+>   ##----------------------------------------------------------------
+>   ##                        1b: Prep and merging
+>   ##---------------------------------------------------------------- 
+>       
+>     allbus_complete <- allbus_all %>% 
+>       filter(as_factor(german) != "NEIN")
+>     
+> #Turn negative values into NA - corresponds to coding for all vars used
+>     allbus_complete %<>% map_dfc(Neg2NA)
+> 
+> ##Type conversions
+>     allbus_complete$education <- as.numeric(allbus_complete$isced97)
+>     allbus_complete$leftright <-as.numeric(allbus_complete$pa01)
+>     allbus_complete$mc11L <- allbus_complete$mc11==1 #Personal contact with refugees
+>     allbus_complete$mc11N <- 2 - allbus_complete$mc11
+> 
+> #Contact with refugees - NEIN as reference level
+>     allbus_complete$mc11 %<>% as_factor() %>% relevel(ref = "NEIN")
+>     
+> #Prep survey weights
+>     allbus_complete$wt <- allbus_complete$wghtpew
+> 
+> #Refugees risks or opportunities scale (social security, safety, cohesion, economy)
+>     scale_items <- c("mp16", "mp17", "mp18", "mp19")
+>     allbus_complete$ref_risk <- make_scale(allbus_complete, scale_items, "ref_risk", reverse = "none", r_key = -1)
+>     
+>     ac.w <- allbus_complete %>% mutate(age = as.numeric(age)) %>% as_survey(ids = ags, weights = wt)    
+>     
+> #Descriptives to check selection
+>     paste("N =",sum(svytable(~sex, design = ac.w))) %>% put()
+>     prop.table(svytable(~as_factor(sex), design = ac.w)) %>% put()
+>     paste("AgeM =",svymean(~age, ac.w, na.rm = TRUE), "\n", "AgeSD =", sqrt(svyvar(~age, ac.w, na.rm = TRUE))) %>% put()
+>     
+>         
+> ##----------------------------------------------------------------
+> ##                  2a: Violence against refugees / data prep    -
+> ##----------------------------------------------------------------
+>     
+>     #NOTE: The first set of calculations here was cached as it takes 2hrs to run
+>     #However, it is based on exactly the syntax shown 
+>     
+>     allbus_ags_list <- unique(allbus_complete$ags)
+>     
+>     summarise_arvig <- function(months, type = "both", radius = 30) {
+>       #Calculates number of violent incidents around each ALLBUS sampling point
+>       
+>       both <- FALSE
+>       
+>       out <- allbus_complete %>% select(respid, xt03, ags)
+>       
+>       if (type == "both") {
+>         type <- "before"
+>         both <- TRUE
+>       }
+>       
+>       if (type == "before") {
+>         out <- out %>% mutate(end_date = ymd(xt03) - 1,
+>                               start_date = as_date(end_date - dmonths(months)))
+>       } else if (type == "after") {
+>         out <- out %>% mutate(start_date = ymd(xt03) + 1,
+>                               end_date = as_date(start_date + dmonths(months)))
+>         months <- paste("after", months, sep = "_")
+>       }
+>       
+>       arvig_summary <- pmap_dfr(out, function(...) {
+>         current <- tibble(...)
+>         res <- arvig_ags_summary(current$ags, geoD = geo_data, startD = current$start_date, endD = current$end_date, km = radius) 
+>         if (!"tbl" %in% class(res)) res <- tibble()
+>         res %>%
+>           mutate(respid = current$respid)
+>       }) %>%  spread(category_en, n, fill=0)
+>       
+>       
+>       possible_categories <- c("miscellaneous attack", "demonstration", "assault", 
+>                                "arson", "other", "demonstration & miscellaneous attack",
+>                                "miscellaneous attack & assault", "arson & miscellaneous attack", "suspicion")
+>       
+>       
+>       walk(possible_categories, function(x) {
+>         if (!x %in% names(arvig_summary)) arvig_summary[x] <<- 0
+>       })
+>       
+>       arvig_summary <- arvig_summary %>% mutate(attacks = `miscellaneous attack` + assault + arson + `miscellaneous attack & assault` + `arson & miscellaneous attack`,
+>                                arson = arson + `arson & miscellaneous attack`,
+>                                assault = assault + `miscellaneous attack & assault`,
+>                                arson_and_assault = arson + assault) %>% select(respid, arson, assault, attacks, arson_and_assault)
+>       
+>       names(arvig_summary) <- c(names(arvig_summary)[1], paste(names(arvig_summary)[-1], months, radius, sep = "_"))
+> 
+>       if (both) return(left_join(arvig_summary, summarise_arvig(months, type = "after", radius = radius)))
+>       
+>       arvig_summary
+>     }
+>     
+>     #Excluded categories: demonstration, suspicion, other, demonstration & miscellaneous attack
+>     
+>     #Find attacks around ALLBUS sample AGS
+>     
+>     # arvig_allbus_ags_6 <- summarise_arvig(6, type = "before")
+>     # arvig_allbus_ags_6_after <- summarise_arvig(6, type = "after")
+>     # 
+>     # arvig_allbus_ags_9 <- summarise_arvig(9, type = "before")
+>     # arvig_allbus_ags_9_after <- summarise_arvig(9, type = "after")
+>     # 
+>     # arvig_allbus_ags_12 <- summarise_arvig(12, type = "before")
+>     # arvig_allbus_ags_12_after <- summarise_arvig(12, type = "after")
+>     # 
+>     # arvig_allbus_ags_20 <- summarise_arvig(6, type = "before", radius = 20)
+>     # arvig_allbus_ags_20_after <- summarise_arvig(6, type = "after", radius = 20)
+>     # 
+>     # arvig_allbus_ags_50 <- summarise_arvig(6, type = "before", radius = 50)
+>     # arvig_allbus_ags_50_after <- summarise_arvig(6, type = "after", radius = 50)
+>     # 
+>     # arvig_summaries <- arvig_allbus_ags_6 %>% 
+>     #   left_join(arvig_allbus_ags_6_after) %>% 
+>     #   left_join(arvig_allbus_ags_9) %>% 
+>     #   left_join(arvig_allbus_ags_9_after) %>% 
+>     #   left_join(arvig_allbus_ags_12) %>% 
+>     #   left_join(arvig_allbus_ags_12_after) %>% 
+>     #   left_join(arvig_allbus_ags_20) %>% 
+>     #   left_join(arvig_allbus_ags_20_after) %>% 
+>     #   left_join(arvig_allbus_ags_50) %>% 
+>     #   left_join(arvig_allbus_ags_50_after)
+>     # 
+>     # #Cached because this takes nearly 2 hours to run 
+>     # write_rds(arvig_summaries, "arvig_summaries.RDS")
+> 
+>     arvig_summaries <- read_rds("arvig_summaries.RDS")
+>     
+>     allbus_complete %<>% left_join(arvig_summaries)
+>     
+>     #Calculate population in 30km radius around Allbus ags
+>     ags_population_30 <- map_dfr(allbus_ags_list, function(x) {
+>       current <- filter(geo_data, ags == x)
+>       res1 <- tibble(arvig_geo_summary(current$lon, current$lat, 
+>                                 data = geo_data_einwohner, 
+>                                 km = 30, counts = FALSE))
+>       res2 <-  geo_data_einwohner %>% filter(ags == x)
+>       
+>       out <- bind_rows(res1[1,], res2[1,])[-c(1:2),]
+>       res1 <- bind_rows(res1, out)
+>       res2 <- bind_rows(res2, out)
+>       
+>       union(res1, res2) %>% summarise(einwohner = sum(einwohner)) %>% 
+>         mutate(ags = x)})
+>     
+>     allbus_complete %<>% left_join(ags_population_30)
+> 
+>     allbus_complete %<>% mutate(across(matches("attacks"), ~.x/(einwohner/1e5), .names = "{.col}_p100k"))
+>      
+>     allbus_svy <- allbus_complete %>% 
+>       select(wt, ref_risk, matches("attacks"),
+>              eastwest, mc11, leftright, education, sex, ags, einwohner) %>%
+>       haven::zap_labels() %>% 
+>       as_survey(ids = ags, weights = wt) 
+>   
+>     allbus_svy_small <- allbus_complete %>% 
+>       select(wt, ref_risk, attacks_6_30, attacks_after_6_30,attacks_6_30_p100k, attacks_after_6_30_p100k,
+>              eastwest, mc11, leftright, education, sex, ags, einwohner) %>%
+>       haven::zap_labels() %>% 
+>       as_survey(ids = ags, weights = wt) 
+>     
+>     ##----------------------------------------------------------------
+>     ##                  2b: Violence against refugees / descriptives    -
+>     ##----------------------------------------------------------------
+>     
+>     sep("Violence - descriptives")
+>     
+>     #Correlations and summary statistics
+>     allbus_svy_small  %>% svy_cor_matrix() %T>% {put(.$desc, n = 1000)} %>% 
+>       tidy.svy_cor_matrix(both_directions = FALSE) %>% filter(column2 != "wt") %>% 
+>       put(n = 1000)
+> 
+>     ##----------------------------------------------------------------
+>     ##                  2b: Violence against refugees / descriptives    -
+>     ##----------------------------------------------------------------
+>     
+>     #This sections runs many permutations for the same model based on reviewer requests
+>     #for robustness checks. I have written a function to show that each set of results is
+>     #based on exactly the same code - hope that facilitates checks.
+>     
+>     run_and_report <- function(before, after, lmer = FALSE) {
+>       before <- rlang::as_label(rlang::enquo(before))
+>       after <- rlang::as_label(rlang::enquo(after))
+>       
+>       hypothesis <- glue::glue("{before}={after}")
+>       basic <- glue::glue("ref_risk ~ {before} + {after}")
+>       covars <- glue::glue("{basic} + einwohner  + mc11 + leftright + education + sex + eastwest")
+>     
+>      put(glue::glue("#### Testing {hypothesis} ####"))  
+>      
+>        put(glue::glue("## Base model ##\n{basic} + (1|ags)"))
+>        mod <- lmer(as.formula(paste(basic, "+ (1|ags)")), data=allbus_svy$variables, weights = allbus_svy$variables$wt)
+>        
+>        summary(mod) %>% put()
+>        model_parameters(mod, standardize = "posthoc") %>% put()
+>        linearHypothesis(mod, hypothesis) %>% put()
+>        put(paste("coef difference:", coef(mod)[[1]][[2]][1]-coef(mod)[[1]][[3]][1], "\n\nVIF:"))
+>        vif(mod) %>% put()
+>        
+>        put("\n\n\n## With covariates ##")    
+>        put(glue::glue("\n\n## With covariates ##\n{covars} + (1|ags)"))
+>        
+>        mod <- lmer(as.formula(paste(covars, "+ (1|ags)")), data=allbus_svy$variables, weights = allbus_svy$variables$wt)
+>        
+>        summary(mod) %>% put()
+>        model_parameters(mod, standardize = "posthoc") %>% put()
+>        linearHypothesis(mod, hypothesis) %>% put()
+>        put(paste("coef difference:", coef(mod)[[1]][[2]][1]-coef(mod)[[1]][[3]][1], "\n\nVIF:"))
+>        vif(mod) %>% put()
+>      }
+>      
+>      invisible(NULL)
+>      
+>     }
+>     
+>     ### Main models
+>     run_and_report(attacks_6_30, attacks_after_6_30, TRUE)
+>     run_and_report(attacks_6_30_p100k, attacks_after_6_30_p100k, TRUE)
+>     
+>     ### Robustness
+>     
+>     ## Different durations
+>     run_and_report(attacks_9_30_p100k, attacks_after_9_30_p100k, TRUE)
+>     run_and_report(attacks_9_30, attacks_after_9_30, TRUE)
+> 
+>     run_and_report(attacks_12_30_p100k, attacks_after_12_30_p100k, TRUE)
+>     run_and_report(attacks_12_30, attacks_after_12_30, TRUE)
+>     
+>     ## Different distances    
+>     run_and_report(attacks_6_20, attacks_after_6_20, TRUE)
+>     run_and_report(attacks_6_20_p100k, attacks_after_6_20_p100k, TRUE)
+>     
+>     run_and_report(attacks_6_50, attacks_after_6_50, TRUE)
+>     run_and_report(attacks_6_50_p100k, attacks_after_6_50_p100k, TRUE)
+>     
+
+
+N = 3243.10676555124
+
+as_factor(sex)
+     MANN      FRAU 
+0.5022656 0.4977344 
+
+AgeM = 51.1462982884498 
+ AgeSD = 17.6633472115297
+
+=========================================================================
+Violence - descriptives
+=========================================================================
+
+# A tibble: 15 x 3
+   var                                          M          SD
+   <chr>                                    <dbl>       <dbl>
+ 1 wt                                       1.10        0.273
+ 2 ref_risk                                 3.51        0.734
+ 3 attacks_6_30                            27.6        29.8  
+ 4 attacks_after_6_30                      18.6        21.3  
+ 5 attacks_6_30_p100k                       3.66        5.67 
+ 6 attacks_after_6_30_p100k                 2.85        5.16 
+ 7 arson_and_assault_6_30_p100k             0.748       1.66 
+ 8 arson_and_assault_after_6_30_p100k       0.749       1.85 
+ 9 arson_and_assault_6_30                   4.32        5.82 
+10 arson_and_assault_after_6_30             3.80        5.50 
+11 eastwest                                 1.19        0.390
+12 leftright                                5.13        1.69 
+13 education                                3.77        1.08 
+14 sex                                      1.50        0.500
+15 einwohner                          1300000.    1217015.   
+
+# A tibble: 91 x 6
+   column1                            column2                             estimate p.value statistic std.error
+   <chr>                              <chr>                                  <dbl>   <dbl>     <dbl>     <dbl>
+ 1 attacks_6_30                       ref_risk                           -0.0610     0       -3.91     0.0156 
+ 2 attacks_after_6_30                 ref_risk                           -0.0377     0.034   -2.31     0.0163 
+ 3 attacks_6_30_p100k                 ref_risk                            0.00108    0.924    0.0768   0.0194 
+ 4 attacks_after_6_30_p100k           ref_risk                            0.0258     0.174    1.37     0.0192 
+ 5 arson_and_assault_6_30_p100k       ref_risk                            0.0178     0.35     0.936    0.0200 
+ 6 arson_and_assault_after_6_30_p100k ref_risk                            0.0493     0.014    2.68     0.0184 
+ 7 arson_and_assault_6_30             ref_risk                           -0.0364     0.04    -2.18     0.0167 
+ 8 arson_and_assault_after_6_30       ref_risk                           -0.0188     0.256   -1.11     0.0167 
+ 9 eastwest                           ref_risk                            0.0680     0        3.89     0.0174 
+10 leftright                          ref_risk                            0.309      0       18.6      0.0167 
+11 education                          ref_risk                           -0.153      0       -8.84     0.0175 
+12 sex                                ref_risk                            0.0234     0.198    1.31     0.0177 
+13 einwohner                          ref_risk                           -0.0356     0.068   -1.86     0.0188 
+14 attacks_after_6_30                 attacks_6_30                        0.950      0      300.       0.00316
+15 attacks_6_30_p100k                 attacks_6_30                        0.129      0       11.4      0.0114 
+16 attacks_after_6_30_p100k           attacks_6_30                        0.0669     0        6.14     0.0109 
+17 arson_and_assault_6_30_p100k       attacks_6_30                        0.0898     0        8.69     0.0104 
+18 arson_and_assault_after_6_30_p100k attacks_6_30                        0.0110     0.31     1.03     0.0110 
+19 arson_and_assault_6_30             attacks_6_30                        0.872      0      125.       0.00695
+20 arson_and_assault_after_6_30       attacks_6_30                        0.805      0       71.5      0.0112 
+21 eastwest                           attacks_6_30                        0.172      0        8.15     0.0210 
+22 leftright                          attacks_6_30                       -0.0705     0       -4.08     0.0173 
+23 education                          attacks_6_30                        0.0647     0        3.63     0.0177 
+24 sex                                attacks_6_30                        0.00361    0.896    0.165    0.0172 
+25 einwohner                          attacks_6_30                        0.607      0       51.0      0.0119 
+26 attacks_6_30_p100k                 attacks_after_6_30                  0.168      0       13.2      0.0128 
+27 attacks_after_6_30_p100k           attacks_after_6_30                  0.179      0       14.7      0.0123 
+28 arson_and_assault_6_30_p100k       attacks_after_6_30                  0.153      0       13.9      0.0111 
+29 arson_and_assault_after_6_30_p100k attacks_after_6_30                  0.113      0        8.52     0.0133 
+30 arson_and_assault_6_30             attacks_after_6_30                  0.872      0      136.       0.00640
+31 arson_and_assault_after_6_30       attacks_after_6_30                  0.874      0      113.       0.00773
+32 eastwest                           attacks_after_6_30                  0.284      0       13.9      0.0203 
+33 leftright                          attacks_after_6_30                 -0.0790     0       -4.42     0.0180 
+34 education                          attacks_after_6_30                  0.0558     0.002    3.07     0.0180 
+35 sex                                attacks_after_6_30                  0.000217   0.938   -0.0269   0.0175 
+36 einwohner                          attacks_after_6_30                  0.545      0       39.3      0.0139 
+37 attacks_after_6_30_p100k           attacks_6_30_p100k                  0.916      0       67.0      0.0137 
+38 arson_and_assault_6_30_p100k       attacks_6_30_p100k                  0.912      0       66.8      0.0136 
+39 arson_and_assault_after_6_30_p100k attacks_6_30_p100k                  0.745      0       24.1      0.0310 
+40 arson_and_assault_6_30             attacks_6_30_p100k                  0.267      0       14.8      0.0181 
+41 arson_and_assault_after_6_30       attacks_6_30_p100k                  0.226      0       13.1      0.0174 
+42 eastwest                           attacks_6_30_p100k                  0.413      0       28.5      0.0146 
+43 leftright                          attacks_6_30_p100k                 -0.0368     0.022   -2.07     0.0181 
+44 education                          attacks_6_30_p100k                  0.0213     0.238    1.20     0.0178 
+45 sex                                attacks_6_30_p100k                 -0.00841    0.612   -0.484    0.0191 
+46 einwohner                          attacks_6_30_p100k                 -0.257      0      -25.8      0.0100 
+47 arson_and_assault_6_30_p100k       attacks_after_6_30_p100k            0.904      0       64.8      0.0139 
+48 arson_and_assault_after_6_30_p100k attacks_after_6_30_p100k            0.865      0       42.5      0.0204 
+49 arson_and_assault_6_30             attacks_after_6_30_p100k            0.228      0       14.2      0.0160 
+50 arson_and_assault_after_6_30       attacks_after_6_30_p100k            0.261      0       14.7      0.0179 
+51 eastwest                           attacks_after_6_30_p100k            0.470      0       31.5      0.0150 
+52 leftright                          attacks_after_6_30_p100k           -0.0399     0.02    -2.15     0.0190 
+53 education                          attacks_after_6_30_p100k            0.00866    0.662    0.458    0.0183 
+54 sex                                attacks_after_6_30_p100k           -0.0125     0.492   -0.687    0.0194 
+55 einwohner                          attacks_after_6_30_p100k           -0.267      0      -29.7      0.00902
+56 arson_and_assault_after_6_30_p100k arson_and_assault_6_30_p100k        0.764      0       33.9      0.0227 
+57 arson_and_assault_6_30             arson_and_assault_6_30_p100k        0.332      0       19.1      0.0175 
+58 arson_and_assault_after_6_30       arson_and_assault_6_30_p100k        0.253      0       13.0      0.0197 
+59 eastwest                           arson_and_assault_6_30_p100k        0.496      0       25.4      0.0197 
+60 leftright                          arson_and_assault_6_30_p100k       -0.0388     0.034   -2.02     0.0195 
+61 education                          arson_and_assault_6_30_p100k        0.0233     0.178    1.31     0.0177 
+62 sex                                arson_and_assault_6_30_p100k       -0.0101     0.584   -0.570    0.0193 
+63 einwohner                          arson_and_assault_6_30_p100k       -0.241      0      -25.3      0.00959
+64 arson_and_assault_6_30             arson_and_assault_after_6_30_p100k  0.177      0        9.25     0.0192 
+65 arson_and_assault_after_6_30       arson_and_assault_after_6_30_p100k  0.325      0       16.6      0.0196 
+66 eastwest                           arson_and_assault_after_6_30_p100k  0.512      0       35.9      0.0143 
+67 leftright                          arson_and_assault_after_6_30_p100k -0.0335     0.074   -1.73     0.0200 
+68 education                          arson_and_assault_after_6_30_p100k  0.00556    0.766    0.317    0.0180 
+69 sex                                arson_and_assault_after_6_30_p100k -0.0150     0.426   -0.806    0.0187 
+70 einwohner                          arson_and_assault_after_6_30_p100k -0.244      0      -33.2      0.00734
+71 arson_and_assault_after_6_30       arson_and_assault_6_30              0.809      0      114.       0.00711
+72 eastwest                           arson_and_assault_6_30              0.428      0       21.7      0.0197 
+73 leftright                          arson_and_assault_6_30             -0.0764     0       -4.39     0.0174 
+74 education                          arson_and_assault_6_30              0.0592     0        3.40     0.0172 
+75 sex                                arson_and_assault_6_30             -0.00719    0.666   -0.431    0.0176 
+76 einwohner                          arson_and_assault_6_30              0.384      0       19.3      0.0198 
+77 eastwest                           arson_and_assault_after_6_30        0.453      0       22.4      0.0202 
+78 leftright                          arson_and_assault_after_6_30       -0.0801     0       -4.55     0.0177 
+79 education                          arson_and_assault_after_6_30        0.0576     0        3.12     0.0183 
+80 sex                                arson_and_assault_after_6_30       -0.00578    0.676   -0.340    0.0177 
+81 einwohner                          arson_and_assault_after_6_30        0.389      0       20.7      0.0187 
+82 leftright                          eastwest                           -0.0725     0       -4.10     0.0178 
+83 education                          eastwest                            0.0291     0.074    1.70     0.0168 
+84 sex                                eastwest                           -0.0202     0.27    -1.10     0.0178 
+85 einwohner                          eastwest                           -0.203      0      -11.3      0.0181 
+86 education                          leftright                          -0.0928     0       -5.06     0.0184 
+87 sex                                leftright                          -0.0672     0       -3.86     0.0176 
+88 einwohner                          leftright                          -0.0239     0.192   -1.27     0.0188 
+89 sex                                education                          -0.119      0       -6.89     0.0173 
+90 einwohner                          education                           0.0725     0        3.71     0.0194 
+91 einwohner                          sex                                 0.00893    0.682    0.446    0.0185 
+
+#### Testing attacks_6_30=attacks_after_6_30 ####
+
+## Base model ##
+ref_risk ~ attacks_6_30 + attacks_after_6_30 + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 7300.1
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-4.1456 -0.6746  0.0642  0.6529  2.7015 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.03056  0.1748  
+ Residual             0.49555  0.7039  
+Number of obs: 3221, groups:  ags, 145
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          3.565570   0.028844 126.068275 123.617  < 2e-16 ***
+attacks_6_30        -0.006127   0.001741 532.089610  -3.519 0.000471 ***
+attacks_after_6_30   0.006749   0.002442 555.763642   2.764 0.005899 ** 
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_30
+attcks_6_30 -0.246       
+attck__6_30 -0.118 -0.875
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(3216) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |  123.62 | < .001
+attacks 6 30       |      -0.25 | 0.07 | [-0.39, -0.11] |   -3.52 | < .001
+attacks after 6 30 |       0.20 | 0.07 | [ 0.06,  0.34] |    2.76 | 0.006 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_30 - attacks_after_6_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_30 + attacks_after_6_30 + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)   
+1                        
+2  1 10.088   0.001493 **
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0128753354177362 
+
+VIF:
+
+      attacks_6_30 attacks_after_6_30 
+          4.269825           4.269825 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_30 + attacks_after_6_30 + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5874.6
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2910 -0.6334  0.0059  0.6549  3.6590 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01486  0.1219  
+ Residual             0.41926  0.6475  
+Number of obs: 2739, groups:  ags, 129
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)         3.005e+00  1.002e-01  8.248e+02  29.985  < 2e-16 ***
+attacks_6_30       -5.458e-03  1.673e-03  4.395e+02  -3.263  0.00119 ** 
+attacks_after_6_30  4.766e-03  2.351e-03  4.493e+02   2.027  0.04323 *  
+einwohner           3.843e-08  1.853e-08  1.285e+02   2.073  0.04013 *  
+mc11JA             -1.841e-01  2.655e-02  2.729e+03  -6.934 5.09e-12 ***
+leftright           1.245e-01  7.651e-03  2.730e+03  16.275  < 2e-16 ***
+education          -7.766e-02  1.213e-02  2.725e+03  -6.402 1.80e-10 ***
+sex                 2.055e-02  2.579e-02  2.715e+03   0.797  0.42572    
+eastwest            1.766e-01  4.434e-02  2.282e+02   3.982 9.17e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_30 a__6_3 enwhnr mc11JA lftrgh eductn sex   
+attcks_6_30 -0.121                                                 
+attck__6_30  0.165 -0.865                                          
+einwohner   -0.280 -0.233 -0.063                                   
+mc11JA      -0.100 -0.021  0.028  0.005                            
+leftright   -0.495  0.001  0.010 -0.005  0.070                     
+education   -0.491 -0.005  0.005 -0.041 -0.143  0.093              
+sex         -0.469  0.001 -0.007 -0.003 -0.018  0.082  0.116       
+eastwest    -0.572  0.185 -0.363  0.371  0.062  0.039 -0.042  0.009
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(2728) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |   29.98 | < .001
+attacks 6 30       |      -0.24 | 0.07 | [-0.38, -0.09] |   -3.26 | 0.001 
+attacks after 6 30 |       0.15 | 0.07 | [ 0.00,  0.29] |    2.03 | 0.043 
+einwohner          |       0.07 | 0.03 | [ 0.00,  0.13] |    2.07 | 0.038 
+mc11 [JA]          |      -0.25 | 0.04 | [-0.32, -0.18] |   -6.93 | < .001
+leftright          |       0.29 | 0.02 | [ 0.26,  0.33] |   16.27 | < .001
+education          |      -0.12 | 0.02 | [-0.15, -0.08] |   -6.40 | < .001
+sex                |       0.01 | 0.02 | [-0.02,  0.05] |    0.80 | 0.426 
+eastwest           |       0.10 | 0.03 | [ 0.05,  0.15] |    3.98 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_30 - attacks_after_6_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_30 + attacks_after_6_30 + einwohner + mc11 + 
+    leftright + education + sex + eastwest + (1 | ags)
+
+  Df Chisq Pr(>Chisq)   
+1                       
+2  1 6.909   0.008576 **
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0102238245730256 
+
+VIF:
+
+      attacks_6_30 attacks_after_6_30          einwohner               mc11          leftright          education 
+          5.981266           5.979686           1.623242           1.034800           1.024550           1.047467 
+               sex           eastwest 
+          1.019378           1.362566 
+
+#### Testing attacks_6_30_p100k=attacks_after_6_30_p100k ####
+
+## Base model ##
+ref_risk ~ attacks_6_30_p100k + attacks_after_6_30_p100k + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6530.5
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.5049 -0.6647  0.0679  0.6782  2.6853 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.02681  0.1637  
+ Residual             0.48227  0.6945  
+Number of obs: 2876, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)                3.519338   0.023417 134.143540 150.287  < 2e-16 ***
+attacks_6_30_p100k        -0.018632   0.007075 448.658845  -2.633  0.00875 ** 
+attacks_after_6_30_p100k   0.022038   0.007866 428.212861   2.802  0.00532 ** 
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_30
+at_6_30_100 -0.223       
+a__6_30_100  0.018 -0.913
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2871) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |  150.29 | < .001
+attacks 6 30 p100k       |      -0.15 | 0.06 | [-0.25, -0.04] |   -2.63 | 0.008 
+attacks after 6 30 p100k |       0.16 | 0.06 | [ 0.05,  0.27] |    2.80 | 0.005 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_30_p100k - attacks_after_6_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_30_p100k + attacks_after_6_30_p100k + (1 | 
+    ags)
+
+  Df Chisq Pr(>Chisq)   
+1                       
+2  1 7.744   0.005389 **
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0406705719890314 
+
+VIF:
+
+      attacks_6_30_p100k attacks_after_6_30_p100k 
+                6.021151                 6.021151 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_30_p100k + attacks_after_6_30_p100k + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5875.8
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2567 -0.6399  0.0078  0.6520  3.6424 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01579  0.1256  
+ Residual             0.41972  0.6479  
+Number of obs: 2739, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)               2.999e+00  9.978e-02  7.840e+02  30.055  < 2e-16 ***
+attacks_6_30_p100k       -1.682e-02  6.405e-03  4.385e+02  -2.627  0.00892 ** 
+attacks_after_6_30_p100k  1.579e-02  7.297e-03  4.188e+02   2.164  0.03104 *  
+einwohner                 5.862e-09  1.568e-08  9.972e+01   0.374  0.70937    
+mc11JA                   -1.836e-01  2.657e-02  2.727e+03  -6.911 5.96e-12 ***
+leftright                 1.248e-01  7.659e-03  2.730e+03  16.296  < 2e-16 ***
+education                -7.671e-02  1.215e-02  2.724e+03  -6.315 3.14e-10 ***
+sex                       2.129e-02  2.582e-02  2.714e+03   0.825  0.40959    
+eastwest                  1.748e-01  4.396e-02  2.078e+02   3.977 9.63e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_30 a__6_3 enwhnr mc11JA lftrgh eductn sex   
+at_6_30_100 -0.067                                                 
+a__6_30_100  0.094 -0.892                                          
+einwohner   -0.287  0.045  0.048                                   
+mc11JA      -0.105 -0.019  0.015  0.011                            
+leftright   -0.499 -0.003  0.010  0.011  0.070                     
+education   -0.492 -0.031  0.025 -0.051 -0.142  0.093              
+sex         -0.468 -0.015  0.014 -0.012 -0.018  0.082  0.117       
+eastwest    -0.553  0.063 -0.238  0.172  0.076  0.042 -0.042  0.003
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2728) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |   30.05 | < .001
+attacks 6 30 p100k       |      -0.13 | 0.05 | [-0.23, -0.03] |   -2.63 | 0.009 
+attacks after 6 30 p100k |       0.11 | 0.05 | [ 0.01,  0.21] |    2.16 | 0.031 
+einwohner                |   9.93e-03 | 0.03 | [-0.04,  0.06] |    0.37 | 0.709 
+mc11 [JA]                |      -0.25 | 0.04 | [-0.32, -0.18] |   -6.91 | < .001
+leftright                |       0.29 | 0.02 | [ 0.26,  0.33] |   16.30 | < .001
+education                |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.32 | < .001
+sex                      |       0.01 | 0.02 | [-0.02,  0.05] |    0.82 | 0.410 
+eastwest                 |       0.10 | 0.03 | [ 0.05,  0.15] |    3.98 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_30_p100k - attacks_after_6_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_30_p100k + attacks_after_6_30_p100k + einwohner + 
+    mc11 + leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 5.9868    0.01441 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.032613497901951 
+
+VIF:
+
+      attacks_6_30_p100k attacks_after_6_30_p100k                einwohner                     mc11 
+                6.034024                 6.421249                 1.129817                 1.034204 
+               leftright                education                      sex                 eastwest 
+                1.024228                 1.048392                 1.019458                 1.311118 
+
+
+#### Testing attacks_9_30_p100k=attacks_after_9_30_p100k ####
+
+## Base model ##
+ref_risk ~ attacks_9_30_p100k + attacks_after_9_30_p100k + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6612.5
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.4882 -0.6658  0.0728  0.6711  2.6624 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.02754  0.1659  
+ Residual             0.48666  0.6976  
+Number of obs: 2904, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)                3.518532   0.023640 136.497809 148.840  < 2e-16 ***
+attacks_9_30_p100k        -0.016094   0.006687 530.738762  -2.407  0.01643 *  
+attacks_after_9_30_p100k   0.019461   0.007518 522.346537   2.589  0.00991 ** 
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_9_30
+at_9_30_100 -0.234       
+a__9_30_100  0.071 -0.944
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2899) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |  148.84 | < .001
+attacks 9 30 p100k       |      -0.17 | 0.07 | [-0.30, -0.03] |   -2.41 | 0.016 
+attacks after 9 30 p100k |       0.18 | 0.07 | [ 0.04,  0.31] |    2.59 | 0.010 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_9_30_p100k - attacks_after_9_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_9_30_p100k + attacks_after_9_30_p100k + (1 | 
+    ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 6.4436    0.01113 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0355549282180588 
+
+VIF:
+
+      attacks_9_30_p100k attacks_after_9_30_p100k 
+                9.249905                 9.249905 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_9_30_p100k + attacks_after_9_30_p100k + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5952.2
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2747 -0.6476  0.0089  0.6581  3.6481 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.0166   0.1288  
+ Residual             0.4233   0.6506  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)               2.994e+00  1.002e-01  7.824e+02  29.883  < 2e-16 ***
+attacks_9_30_p100k       -1.444e-02  6.094e-03  4.893e+02  -2.370 0.018186 *  
+attacks_after_9_30_p100k  1.432e-02  6.978e-03  4.822e+02   2.052 0.040665 *  
+einwohner                 6.941e-09  1.587e-08  1.019e+02   0.438 0.662672    
+mc11JA                   -1.880e-01  2.649e-02  2.755e+03  -7.098  1.6e-12 ***
+leftright                 1.264e-01  7.658e-03  2.757e+03  16.505  < 2e-16 ***
+education                -7.436e-02  1.212e-02  2.752e+03  -6.134  9.8e-10 ***
+sex                       1.324e-02  2.577e-02  2.740e+03   0.514 0.607538    
+eastwest                  1.751e-01  4.451e-02  2.139e+02   3.934 0.000113 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_9_30 a__9_3 enwhnr mc11JA lftrgh eductn sex   
+at_9_30_100 -0.076                                                 
+a__9_30_100  0.101 -0.931                                          
+einwohner   -0.287  0.021  0.050                                   
+mc11JA      -0.107 -0.022  0.019  0.013                            
+leftright   -0.497 -0.004  0.009  0.012  0.071                     
+education   -0.490 -0.017  0.013 -0.051 -0.140  0.091              
+sex         -0.468 -0.002  0.001 -0.013 -0.018  0.085  0.119       
+eastwest    -0.558  0.064 -0.208  0.170  0.076  0.041 -0.040  0.003
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2756) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |   29.88 | < .001
+attacks 9 30 p100k       |      -0.15 | 0.06 | [-0.27, -0.03] |   -2.37 | 0.018 
+attacks after 9 30 p100k |       0.13 | 0.06 | [ 0.01,  0.26] |    2.05 | 0.040 
+einwohner                |       0.01 | 0.03 | [-0.04,  0.06] |    0.44 | 0.662 
+mc11 [JA]                |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.10 | < .001
+leftright                |       0.29 | 0.02 | [ 0.26,  0.33] |   16.51 | < .001
+education                |      -0.11 | 0.02 | [-0.15, -0.07] |   -6.13 | < .001
+sex                      |   9.07e-03 | 0.02 | [-0.03,  0.04] |    0.51 | 0.608 
+eastwest                 |       0.10 | 0.03 | [ 0.05,  0.15] |    3.93 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_9_30_p100k - attacks_after_9_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_9_30_p100k + attacks_after_9_30_p100k + einwohner + 
+    mc11 + leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 5.0149    0.02513 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0287617636602625 
+
+VIF:
+
+      attacks_9_30_p100k attacks_after_9_30_p100k                einwohner                     mc11 
+                9.332530                 9.798947                 1.126136                 1.033909 
+               leftright                education                      sex                 eastwest 
+                1.024520                 1.047184                 1.020282                 1.316972 
+
+#### Testing attacks_9_30=attacks_after_9_30 ####
+
+## Base model ##
+ref_risk ~ attacks_9_30 + attacks_after_9_30 + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 7387.1
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-4.0943 -0.6710  0.0715  0.6566  2.6867 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.03263  0.1806  
+ Residual             0.49957  0.7068  
+Number of obs: 3249, groups:  ags, 145
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          3.558349   0.029274 122.470393 121.554   <2e-16 ***
+attacks_9_30        -0.002896   0.001166 489.259126  -2.485   0.0133 *  
+attacks_after_9_30   0.002871   0.001621 546.837099   1.771   0.0771 .  
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_9_30
+attcks_9_30 -0.274       
+attck__9_30 -0.142 -0.835
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(3244) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |  121.55 | < .001
+attacks 9 30       |      -0.16 | 0.06 | [-0.28, -0.03] |   -2.48 | 0.013 
+attacks after 9 30 |       0.11 | 0.06 | [-0.01,  0.24] |    1.77 | 0.077 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_9_30 - attacks_after_9_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_9_30 + attacks_after_9_30 + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 4.6564    0.03094 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.00576647695462084 
+
+VIF:
+
+      attacks_9_30 attacks_after_9_30 
+          3.308855           3.308855 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_9_30 + attacks_after_9_30 + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5955.6
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.3074 -0.6393  0.0125  0.6542  3.7022 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01585  0.1259  
+ Residual             0.42336  0.6507  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)         2.973e+00  9.997e-02  8.152e+02  29.742  < 2e-16 ***
+attacks_9_30       -2.757e-03  1.121e-03  3.657e+02  -2.459   0.0144 *  
+attacks_after_9_30  1.750e-03  1.484e-03  3.623e+02   1.179   0.2391    
+einwohner           3.978e-08  1.941e-08  1.287e+02   2.049   0.0425 *  
+mc11JA             -1.880e-01  2.649e-02  2.757e+03  -7.096 1.62e-12 ***
+leftright           1.264e-01  7.656e-03  2.758e+03  16.509  < 2e-16 ***
+education          -7.492e-02  1.212e-02  2.753e+03  -6.183 7.23e-10 ***
+sex                 1.204e-02  2.578e-02  2.740e+03   0.467   0.6407    
+eastwest            1.945e-01  4.381e-02  2.119e+02   4.440 1.45e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_9_30 a__9_3 enwhnr mc11JA lftrgh eductn sex   
+attcks_9_30 -0.040                                                 
+attck__9_30  0.102 -0.811                                          
+einwohner   -0.283 -0.374  0.022                                   
+mc11JA      -0.105 -0.032  0.036  0.015                            
+leftright   -0.497 -0.012  0.022  0.002  0.072                     
+education   -0.492 -0.002  0.001 -0.038 -0.140  0.092              
+sex         -0.472  0.027 -0.034 -0.010 -0.020  0.085  0.119       
+eastwest    -0.568  0.035 -0.259  0.377  0.069  0.040 -0.042  0.012
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(2756) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |   29.74 | < .001
+attacks 9 30       |      -0.16 | 0.06 | [-0.28, -0.03] |   -2.46 | 0.014 
+attacks after 9 30 |       0.07 | 0.06 | [-0.05,  0.20] |    1.18 | 0.238 
+einwohner          |       0.07 | 0.03 | [ 0.00,  0.13] |    2.05 | 0.041 
+mc11 [JA]          |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.10 | < .001
+leftright          |       0.29 | 0.02 | [ 0.26,  0.33] |   16.51 | < .001
+education          |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.18 | < .001
+sex                |   8.24e-03 | 0.02 | [-0.03,  0.04] |    0.47 | 0.641 
+eastwest           |       0.11 | 0.02 | [ 0.06,  0.16] |    4.44 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_9_30 - attacks_after_9_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_9_30 + attacks_after_9_30 + einwohner + mc11 + 
+    leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 3.2983    0.06935 .
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.00450675570674418 
+
+VIF:
+
+      attacks_9_30 attacks_after_9_30          einwohner               mc11          leftright          education 
+          4.691964           4.231095           1.723750           1.034903           1.024927           1.046851 
+               sex           eastwest 
+          1.021457           1.296374 
+
+#### Testing attacks_12_30_p100k=attacks_after_12_30_p100k ####
+
+## Base model ##
+ref_risk ~ attacks_12_30_p100k + attacks_after_12_30_p100k + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6614.9
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.4847 -0.6640  0.0698  0.6675  2.6665 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.02778  0.1667  
+ Residual             0.48686  0.6978  
+Number of obs: 2904, groups:  ags, 129
+
+Fixed effects:
+                            Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)                 3.519260   0.023651 137.345798 148.797   <2e-16 ***
+attacks_12_30_p100k        -0.012177   0.005950 662.917849  -2.046   0.0411 *  
+attacks_after_12_30_p100k   0.013941   0.006284 668.836920   2.218   0.0269 *  
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_12_3
+a_12_30_100 -0.262       
+a__12_30_10  0.109 -0.948
+
+# Fixed Effects
+
+Parameter                 | Std. Coef. |   SE |         95% CI | t(2899) |      p
+---------------------------------------------------------------------------------
+(Intercept)               |       0.00 | 0.00 | [ 0.00,  0.00] |  148.80 | < .001
+attacks 12 30 p100k       |      -0.14 | 0.07 | [-0.28, -0.01] |   -2.05 | 0.041 
+attacks after 12 30 p100k |       0.16 | 0.07 | [ 0.02,  0.30] |    2.22 | 0.027 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_12_30_p100k - attacks_after_12_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_12_30_p100k + attacks_after_12_30_p100k + 
+    (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 4.6794    0.03053 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0261179510857193 
+
+VIF:
+
+      attacks_12_30_p100k attacks_after_12_30_p100k 
+                 9.836815                  9.836815 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_12_30_p100k + attacks_after_12_30_p100k + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5955.4
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2891 -0.6474  0.0138  0.6570  3.6410 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01685  0.1298  
+ Residual             0.42360  0.6508  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                            Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)                2.988e+00  1.004e-01  7.770e+02  29.761  < 2e-16 ***
+attacks_12_30_p100k       -9.236e-03  5.438e-03  5.741e+02  -1.698    0.090 .  
+attacks_after_12_30_p100k  8.207e-03  5.852e-03  5.819e+02   1.402    0.161    
+einwohner                  6.932e-09  1.590e-08  1.012e+02   0.436    0.664    
+mc11JA                    -1.880e-01  2.651e-02  2.755e+03  -7.093 1.66e-12 ***
+leftright                  1.262e-01  7.661e-03  2.757e+03  16.478  < 2e-16 ***
+education                 -7.450e-02  1.213e-02  2.752e+03  -6.143 9.26e-10 ***
+sex                        1.304e-02  2.578e-02  2.739e+03   0.506    0.613    
+eastwest                   1.804e-01  4.454e-02  2.130e+02   4.050 7.17e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_12_3 a__12_ enwhnr mc11JA lftrgh eductn sex   
+a_12_30_100 -0.076                                                 
+a__12_30_10  0.102 -0.935                                          
+einwohner   -0.288  0.021  0.045                                   
+mc11JA      -0.106 -0.031  0.026  0.012                            
+leftright   -0.497  0.005  0.000  0.011  0.071                     
+education   -0.489 -0.016  0.013 -0.050 -0.140  0.091              
+sex         -0.467  0.003 -0.003 -0.012 -0.019  0.085  0.119       
+eastwest    -0.560  0.044 -0.185  0.175  0.076  0.043 -0.040  0.003
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter                 | Std. Coef. |   SE |         95% CI | t(2756) |      p
+---------------------------------------------------------------------------------
+(Intercept)               |       0.00 | 0.00 | [ 0.00,  0.00] |   29.76 | < .001
+attacks 12 30 p100k       |      -0.11 | 0.06 | [-0.24,  0.02] |   -1.70 | 0.090 
+attacks after 12 30 p100k |       0.09 | 0.07 | [-0.04,  0.22] |    1.40 | 0.161 
+einwohner                 |       0.01 | 0.03 | [-0.04,  0.06] |    0.44 | 0.663 
+mc11 [JA]                 |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.09 | < .001
+leftright                 |       0.29 | 0.02 | [ 0.26,  0.33] |   16.48 | < .001
+education                 |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.14 | < .001
+sex                       |   8.93e-03 | 0.02 | [-0.03,  0.04] |    0.51 | 0.613 
+eastwest                  |       0.10 | 0.03 | [ 0.05,  0.15] |    4.05 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_12_30_p100k - attacks_after_12_30_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_12_30_p100k + attacks_after_12_30_p100k + 
+    einwohner + mc11 + leftright + education + sex + eastwest + 
+    (1 | ags)
+
+  Df  Chisq Pr(>Chisq)
+1                     
+2  1 2.4665     0.1163
+
+coef difference: -0.017442693929342 
+
+VIF:
+
+      attacks_12_30_p100k attacks_after_12_30_p100k                 einwohner                      mc11 
+                10.012213                 10.413947                  1.122295                  1.034342 
+                leftright                 education                       sex                  eastwest 
+                 1.024454                  1.047097                  1.020282                  1.311258 
+
+#### Testing attacks_12_30=attacks_after_12_30 ####
+
+## Base model ##
+ref_risk ~ attacks_12_30 + attacks_after_12_30 + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 7390.4
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-4.0746 -0.6679  0.0770  0.6560  2.7022 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.03314  0.1820  
+ Residual             0.49973  0.7069  
+Number of obs: 3249, groups:  ags, 145
+
+Fixed effects:
+                      Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          3.558e+00  2.900e-02  1.211e+02 122.699   <2e-16 ***
+attacks_12_30       -1.625e-03  8.502e-04  4.787e+02  -1.911   0.0566 .  
+attacks_after_12_30  1.142e-03  1.141e-03  4.642e+02   1.000   0.3177    
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_12_3
+attck_12_30 -0.304       
+attc__12_30 -0.184 -0.767
+
+# Fixed Effects
+
+Parameter           | Std. Coef. |   SE |        95% CI | t(3244) |      p
+--------------------------------------------------------------------------
+(Intercept)         |       0.00 | 0.00 | [ 0.00, 0.00] |  122.70 | < .001
+attacks 12 30       |      -0.10 | 0.05 | [-0.21, 0.00] |   -1.91 | 0.056 
+attacks after 12 30 |       0.06 | 0.06 | [-0.05, 0.17] |    1.00 | 0.317 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_12_30 - attacks_after_12_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_12_30 + attacks_after_12_30 + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)
+1                     
+2  1 2.1781       0.14
+
+coef difference: -0.00276650078045445 
+
+VIF:
+
+      attacks_12_30 attacks_after_12_30 
+           2.430854            2.430854 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_12_30 + attacks_after_12_30 + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5958.4
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.3188 -0.6420  0.0098  0.6558  3.6618 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01598  0.1264  
+ Residual             0.42357  0.6508  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                      Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          2.960e+00  9.998e-02  8.101e+02  29.610  < 2e-16 ***
+attacks_12_30       -1.538e-03  8.231e-04  3.661e+02  -1.869   0.0625 .  
+attacks_after_12_30  2.547e-04  1.020e-03  2.848e+02   0.250   0.8030    
+einwohner            3.867e-08  1.955e-08  1.317e+02   1.979   0.0500 *  
+mc11JA              -1.882e-01  2.651e-02  2.756e+03  -7.100 1.58e-12 ***
+leftright            1.263e-01  7.659e-03  2.758e+03  16.491  < 2e-16 ***
+education           -7.493e-02  1.212e-02  2.753e+03  -6.182 7.27e-10 ***
+sex                  1.293e-02  2.578e-02  2.741e+03   0.501   0.6161    
+eastwest             2.049e-01  4.375e-02  2.061e+02   4.682 5.15e-06 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_12_3 a__12_ enwhnr mc11JA lftrgh eductn sex   
+attck_12_30  0.001                                                 
+attc__12_30  0.080 -0.732                                          
+einwohner   -0.293 -0.423  0.007                                   
+mc11JA      -0.106 -0.040  0.041  0.021                            
+leftright   -0.497 -0.012  0.023  0.003  0.072                     
+education   -0.492 -0.003  0.003 -0.039 -0.140  0.092              
+sex         -0.470  0.015 -0.021 -0.009 -0.019  0.085  0.119       
+eastwest    -0.568 -0.034 -0.240  0.387  0.071  0.041 -0.043  0.008
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter           | Std. Coef. |   SE |         95% CI | t(2756) |      p
+---------------------------------------------------------------------------
+(Intercept)         |       0.00 | 0.00 | [ 0.00,  0.00] |   29.61 | < .001
+attacks 12 30       |      -0.10 | 0.05 | [-0.21,  0.01] |   -1.87 | 0.062 
+attacks after 12 30 |       0.01 | 0.05 | [-0.09,  0.12] |    0.25 | 0.803 
+einwohner           |       0.06 | 0.03 | [ 0.00,  0.13] |    1.98 | 0.048 
+mc11 [JA]           |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.10 | < .001
+leftright           |       0.29 | 0.02 | [ 0.26,  0.33] |   16.49 | < .001
+education           |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.18 | < .001
+sex                 |   8.86e-03 | 0.02 | [-0.03,  0.04] |    0.50 | 0.616 
+eastwest            |       0.12 | 0.02 | [ 0.07,  0.16] |    4.68 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_12_30 - attacks_after_12_30 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_12_30 + attacks_after_12_30 + einwohner + 
+    mc11 + leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)
+1                     
+2  1 1.0904     0.2964
+
+coef difference: -0.001792694514324 
+
+VIF:
+
+      attacks_12_30 attacks_after_12_30           einwohner                mc11           leftright           education 
+           3.496181            3.014897            1.739707            1.035460            1.024904            1.046846 
+                sex            eastwest 
+           1.020745            1.288695 
+
+
+#### Testing attacks_6_20=attacks_after_6_20 ####
+
+## Base model ##
+ref_risk ~ attacks_6_20 + attacks_after_6_20 + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6702.2
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-4.1357 -0.6718  0.0613  0.6567  2.6855 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.03281  0.1811  
+ Residual             0.48818  0.6987  
+Number of obs: 2962, groups:  ags, 140
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          3.559671   0.025965 123.178182 137.094   <2e-16 ***
+attacks_6_20        -0.005084   0.002355 892.605403  -2.159   0.0311 *  
+attacks_after_6_20   0.004471   0.003540 942.271002   1.263   0.2068    
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_20
+attcks_6_20 -0.144       
+attck__6_20 -0.135 -0.891
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(2957) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |  137.09 | < .001
+attacks 6 20       |      -0.19 | 0.09 | [-0.37, -0.02] |   -2.16 | 0.031 
+attacks after 6 20 |       0.11 | 0.09 | [-0.06,  0.29] |    1.26 | 0.207 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_20 - attacks_after_6_20 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_20 + attacks_after_6_20 + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 2.7726    0.09589 .
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.00955532834018249 
+
+VIF:
+
+      attacks_6_20 attacks_after_6_20 
+          4.859957           4.859957 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_20 + attacks_after_6_20 + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5505.5
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.3064 -0.6453  0.0034  0.6472  3.6132 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01521  0.1233  
+ Residual             0.41729  0.6460  
+Number of obs: 2566, groups:  ags, 127
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)         2.950e+00  1.025e-01  7.874e+02  28.768  < 2e-16 ***
+attacks_6_20       -4.318e-03  2.147e-03  5.969e+02  -2.011   0.0447 *  
+attacks_after_6_20  3.242e-03  3.244e-03  6.247e+02   0.999   0.3180    
+einwohner           2.869e-08  1.749e-08  1.132e+02   1.640   0.1038    
+mc11JA             -1.764e-01  2.739e-02  2.556e+03  -6.441 1.42e-10 ***
+leftright           1.249e-01  7.882e-03  2.557e+03  15.845  < 2e-16 ***
+education          -7.641e-02  1.250e-02  2.554e+03  -6.112 1.14e-09 ***
+sex                 3.107e-02  2.663e-02  2.542e+03   1.167   0.2434    
+eastwest            1.915e-01  4.253e-02  1.933e+02   4.502 1.16e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_20 a__6_2 enwhnr mc11JA lftrgh eductn sex   
+attcks_6_20 -0.055                                                 
+attck__6_20  0.088 -0.901                                          
+einwohner   -0.306 -0.124 -0.084                                   
+mc11JA      -0.099 -0.036  0.039  0.009                            
+leftright   -0.496  0.007  0.006 -0.006  0.060                     
+education   -0.499  0.008 -0.014 -0.038 -0.143  0.095              
+sex         -0.474 -0.007  0.002 -0.001 -0.017  0.078  0.123       
+eastwest    -0.568  0.093 -0.194  0.340  0.073  0.041 -0.043  0.005
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(2555) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |   28.77 | < .001
+attacks 6 20       |      -0.18 | 0.09 | [-0.35,  0.00] |   -2.01 | 0.044 
+attacks after 6 20 |       0.09 | 0.09 | [-0.08,  0.26] |    1.00 | 0.318 
+einwohner          |       0.05 | 0.03 | [-0.01,  0.11] |    1.64 | 0.101 
+mc11 [JA]          |      -0.24 | 0.04 | [-0.32, -0.17] |   -6.44 | < .001
+leftright          |       0.29 | 0.02 | [ 0.26,  0.33] |   15.84 | < .001
+education          |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.11 | < .001
+sex                |       0.02 | 0.02 | [-0.01,  0.06] |    1.17 | 0.243 
+eastwest           |       0.11 | 0.02 | [ 0.06,  0.16] |    4.50 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_20 - attacks_after_6_20 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_20 + attacks_after_6_20 + einwohner + mc11 + 
+    leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)
+1                     
+2  1 2.0644     0.1508
+
+coef difference: -0.00755963111045655 
+
+VIF:
+
+      attacks_6_20 attacks_after_6_20          einwohner               mc11          leftright          education 
+          6.814096           6.834897           1.390972           1.033968           1.022702           1.049811 
+               sex           eastwest 
+          1.020068           1.181408 
+
+#### Testing attacks_6_20_p100k=attacks_after_6_20_p100k ####
+
+## Base model ##
+ref_risk ~ attacks_6_20_p100k + attacks_after_6_20_p100k + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6106.3
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.5253 -0.6654  0.0628  0.6796  2.6984 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.02696  0.1642  
+ Residual             0.47819  0.6915  
+Number of obs: 2695, groups:  ags, 127
+
+Fixed effects:
+                          Estimate Std. Error        df t value Pr(>|t|)    
+(Intercept)                3.53218    0.02296 127.76186 153.826   <2e-16 ***
+attacks_6_20_p100k        -0.03048    0.01377 615.87807  -2.215   0.0272 *  
+attacks_after_6_20_p100k   0.03224    0.01620 659.70924   1.990   0.0470 *  
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_20
+at_6_20_100 -0.218       
+a__6_20_100  0.087 -0.947
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2690) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |  153.83 | < .001
+attacks 6 20 p100k       |      -0.16 | 0.07 | [-0.30, -0.02] |   -2.21 | 0.027 
+attacks after 6 20 p100k |       0.14 | 0.07 | [ 0.00,  0.28] |    1.99 | 0.047 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_20_p100k - attacks_after_6_20_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_20_p100k + attacks_after_6_20_p100k + (1 | 
+    ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 4.5002    0.03389 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0627199136950749 
+
+VIF:
+
+      attacks_6_20_p100k attacks_after_6_20_p100k 
+                9.628789                 9.628789 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_20_p100k + attacks_after_6_20_p100k + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5499.5
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2404 -0.6438  0.0060  0.6441  3.6248 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01425  0.1194  
+ Residual             0.41779  0.6464  
+Number of obs: 2566, groups:  ags, 127
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)               2.962e+00  1.019e-01  7.691e+02  29.075  < 2e-16 ***
+attacks_6_20_p100k       -3.057e-02  1.242e-02  5.316e+02  -2.461   0.0142 *  
+attacks_after_6_20_p100k  2.776e-02  1.485e-02  5.984e+02   1.870   0.0620 .  
+einwohner                 5.431e-09  1.538e-08  8.920e+01   0.353   0.7248    
+mc11JA                   -1.757e-01  2.739e-02  2.556e+03  -6.415 1.67e-10 ***
+leftright                 1.254e-01  7.880e-03  2.557e+03  15.908  < 2e-16 ***
+education                -7.585e-02  1.251e-02  2.554e+03  -6.065 1.52e-09 ***
+sex                       3.213e-02  2.665e-02  2.543e+03   1.206   0.2280    
+eastwest                  1.896e-01  4.250e-02  1.847e+02   4.460 1.42e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_20 a__6_2 enwhnr mc11JA lftrgh eductn sex   
+at_6_20_100 -0.054                                                 
+a__6_20_100  0.070 -0.939                                          
+einwohner   -0.298  0.037  0.011                                   
+mc11JA      -0.102 -0.029  0.027  0.012                            
+leftright   -0.500 -0.007  0.013  0.011  0.060                     
+education   -0.501 -0.015  0.005 -0.054 -0.143  0.095              
+sex         -0.475 -0.030  0.028 -0.007 -0.017  0.078  0.123       
+eastwest    -0.553  0.055 -0.154  0.224  0.079  0.042 -0.041  0.002
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2555) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |   29.08 | < .001
+attacks 6 20 p100k       |      -0.16 | 0.06 | [-0.28, -0.03] |   -2.46 | 0.014 
+attacks after 6 20 p100k |       0.12 | 0.06 | [-0.01,  0.24] |    1.87 | 0.062 
+einwohner                |   9.34e-03 | 0.03 | [-0.04,  0.06] |    0.35 | 0.724 
+mc11 [JA]                |      -0.24 | 0.04 | [-0.32, -0.17] |   -6.41 | < .001
+leftright                |       0.29 | 0.02 | [ 0.26,  0.33] |   15.91 | < .001
+education                |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.06 | < .001
+sex                      |       0.02 | 0.02 | [-0.01,  0.06] |    1.21 | 0.228 
+eastwest                 |       0.11 | 0.02 | [ 0.06,  0.16] |    4.46 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_20_p100k - attacks_after_6_20_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_20_p100k + attacks_after_6_20_p100k + einwohner + 
+    mc11 + leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 4.7187    0.02984 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0583310027430477 
+
+VIF:
+
+      attacks_6_20_p100k attacks_after_6_20_p100k                einwohner                     mc11 
+                9.511443                 9.732906                 1.105245                 1.033473 
+               leftright                education                      sex                 eastwest 
+                1.022442                 1.050467                 1.020864                 1.203602 
+
+
+#### Testing attacks_6_50=attacks_after_6_50 ####
+
+## Base model ##
+ref_risk ~ attacks_6_50 + attacks_after_6_50 + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 7393.4
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-4.0918 -0.6778  0.0660  0.6596  2.7030 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.03418  0.1849  
+ Residual             0.49801  0.7057  
+Number of obs: 3255, groups:  ags, 145
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)          3.555695   0.036112 144.622529  98.462  < 2e-16 ***
+attacks_6_50        -0.003170   0.001046 456.044255  -3.031  0.00258 ** 
+attacks_after_6_50   0.004084   0.001459 516.511632   2.800  0.00530 ** 
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_50
+attcks_6_50 -0.341       
+attck__6_50 -0.084 -0.864
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(3250) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |   98.46 | < .001
+attacks 6 50       |      -0.18 | 0.06 | [-0.29, -0.06] |   -3.03 | 0.002 
+attacks after 6 50 |       0.16 | 0.06 | [ 0.05,  0.27] |    2.80 | 0.005 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_50 - attacks_after_6_50 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_50 + attacks_after_6_50 + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)   
+1                        
+2  1 8.9816   0.002727 **
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.00725470196811248 
+
+VIF:
+
+      attacks_6_50 attacks_after_6_50 
+          3.954399           3.954399 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_50 + attacks_after_6_50 + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5954.7
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.3071 -0.6346  0.0107  0.6566  3.6668 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01663  0.1289  
+ Residual             0.42280  0.6502  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                     Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)         2.997e+00  1.009e-01  7.825e+02  29.713  < 2e-16 ***
+attacks_6_50       -2.847e-03  1.039e-03  3.725e+02  -2.739  0.00647 ** 
+attacks_after_6_50  2.205e-03  1.427e-03  4.291e+02   1.545  0.12315    
+einwohner           4.277e-08  2.032e-08  1.354e+02   2.105  0.03718 *  
+mc11JA             -1.904e-01  2.649e-02  2.756e+03  -7.188 8.45e-13 ***
+leftright           1.261e-01  7.653e-03  2.757e+03  16.473  < 2e-16 ***
+education          -7.540e-02  1.212e-02  2.752e+03  -6.223 5.62e-10 ***
+sex                 1.275e-02  2.576e-02  2.738e+03   0.495  0.62082    
+eastwest            1.968e-01  4.795e-02  2.379e+02   4.105 5.57e-05 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_50 a__6_5 enwhnr mc11JA lftrgh eductn sex   
+attcks_6_50 -0.116                                                 
+attck__6_50  0.161 -0.823                                          
+einwohner   -0.252 -0.367  0.001                                   
+mc11JA      -0.101 -0.007  0.032 -0.010                            
+leftright   -0.495  0.010 -0.004 -0.001  0.071                     
+education   -0.486  0.007  0.004 -0.050 -0.140  0.092              
+sex         -0.466  0.010 -0.014 -0.008 -0.019  0.085  0.119       
+eastwest    -0.547  0.068 -0.358  0.433  0.045  0.040 -0.048  0.009
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter          | Std. Coef. |   SE |         95% CI | t(2756) |      p
+--------------------------------------------------------------------------
+(Intercept)        |       0.00 | 0.00 | [ 0.00,  0.00] |   29.71 | < .001
+attacks 6 50       |      -0.16 | 0.06 | [-0.28, -0.05] |   -2.74 | 0.006 
+attacks after 6 50 |       0.09 | 0.06 | [-0.02,  0.21] |    1.54 | 0.123 
+einwohner          |       0.07 | 0.03 | [ 0.00,  0.14] |    2.10 | 0.035 
+mc11 [JA]          |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.19 | < .001
+leftright          |       0.29 | 0.02 | [ 0.26,  0.33] |   16.47 | < .001
+education          |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.22 | < .001
+sex                |   8.73e-03 | 0.02 | [-0.03,  0.04] |    0.49 | 0.621 
+eastwest           |       0.11 | 0.03 | [ 0.06,  0.16] |    4.10 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_50 - attacks_after_6_50 = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_50 + attacks_after_6_50 + einwohner + mc11 + 
+    leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 4.5907    0.03215 *
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.00505123036149499 
+
+VIF:
+
+      attacks_6_50 attacks_after_6_50          einwohner               mc11          leftright          education 
+          5.475562           5.229036           1.847700           1.035562           1.024459           1.047170 
+               sex           eastwest 
+          1.020483           1.528993 
+
+#### Testing attacks_6_50_p100k=attacks_after_6_50_p100k ####
+
+
+## Base model ##
+ref_risk ~ attacks_6_50_p100k + attacks_after_6_50_p100k + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(basic, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 6615.3
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.4769 -0.6669  0.0700  0.6733  2.6801 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.02794  0.1672  
+ Residual             0.48669  0.6976  
+Number of obs: 2904, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)                3.505294   0.024524 133.006574 142.935   <2e-16 ***
+attacks_6_50_p100k        -0.007459   0.004529 564.668148  -1.647   0.1002    
+attacks_after_6_50_p100k   0.011493   0.005577 529.824632   2.061   0.0398 *  
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_50
+at_6_50_100 -0.249       
+a__6_50_100  0.096 -0.958
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |        95% CI | t(2899) |      p
+-------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00, 0.00] |  142.93 | < .001
+attacks 6 50 p100k       |      -0.13 | 0.08 | [-0.29, 0.03] |   -1.65 | 0.100 
+attacks after 6 50 p100k |       0.17 | 0.08 | [ 0.01, 0.32] |    2.06 | 0.039 
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_50_p100k - attacks_after_6_50_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_50_p100k + attacks_after_6_50_p100k + (1 | 
+    ags)
+
+  Df  Chisq Pr(>Chisq)  
+1                       
+2  1 3.5915    0.05807 .
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+coef difference: -0.0189514414843949 
+
+VIF:
+
+      attacks_6_50_p100k attacks_after_6_50_p100k 
+                12.08933                 12.08933 
+
+
+
+
+## With covariates ##
+
+
+## With covariates ##
+ref_risk ~ attacks_6_50_p100k + attacks_after_6_50_p100k + einwohner  + mc11 + leftright + education + sex + eastwest + (1|ags)
+
+Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+Formula: as.formula(paste(covars, "+ (1|ags)"))
+   Data: allbus_svy$variables
+Weights: allbus_svy$variables$wt
+
+REML criterion at convergence: 5958.3
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.2697 -0.6433  0.0084  0.6599  3.6408 
+
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ ags      (Intercept) 0.01739  0.1319  
+ Residual             0.42364  0.6509  
+Number of obs: 2767, groups:  ags, 129
+
+Fixed effects:
+                           Estimate Std. Error         df t value Pr(>|t|)    
+(Intercept)               2.994e+00  1.010e-01  7.631e+02  29.647  < 2e-16 ***
+attacks_6_50_p100k       -4.619e-03  4.175e-03  5.408e+02  -1.106 0.269125    
+attacks_after_6_50_p100k  5.785e-03  5.231e-03  5.036e+02   1.106 0.269301    
+einwohner                 8.361e-09  1.629e-08  1.027e+02   0.513 0.608939    
+mc11JA                   -1.885e-01  2.652e-02  2.755e+03  -7.108 1.49e-12 ***
+leftright                 1.262e-01  7.665e-03  2.757e+03  16.467  < 2e-16 ***
+education                -7.481e-02  1.213e-02  2.752e+03  -6.168 7.94e-10 ***
+sex                       1.317e-02  2.579e-02  2.738e+03   0.511 0.609504    
+eastwest                  1.664e-01  4.581e-02  2.084e+02   3.633 0.000353 ***
+---
+Signif. codes:  0 �***� 0.001 �**� 0.01 �*� 0.05 �.� 0.1 � � 1
+
+Correlation of Fixed Effects:
+            (Intr) a_6_50 a__6_5 enwhnr mc11JA lftrgh eductn sex   
+at_6_50_100 -0.119                                                 
+a__6_50_100  0.137 -0.945                                          
+einwohner   -0.290  0.080  0.003                                   
+mc11JA      -0.103 -0.034  0.033  0.011                            
+leftright   -0.496  0.017 -0.011  0.014  0.071                     
+education   -0.487  0.000  0.001 -0.046 -0.141  0.092              
+sex         -0.465  0.002 -0.003 -0.012 -0.018  0.085  0.119       
+eastwest    -0.552  0.080 -0.221  0.138  0.070  0.041 -0.043  0.003
+fit warnings:
+Some predictor variables are on very different scales: consider rescaling
+
+# Fixed Effects
+
+Parameter                | Std. Coef. |   SE |         95% CI | t(2756) |      p
+--------------------------------------------------------------------------------
+(Intercept)              |       0.00 | 0.00 | [ 0.00,  0.00] |   29.65 | < .001
+attacks 6 50 p100k       |      -0.08 | 0.07 | [-0.23,  0.06] |   -1.11 | 0.269 
+attacks after 6 50 p100k |       0.08 | 0.08 | [-0.06,  0.23] |    1.11 | 0.269 
+einwohner                |       0.01 | 0.03 | [-0.04,  0.07] |    0.51 | 0.608 
+mc11 [JA]                |      -0.26 | 0.04 | [-0.33, -0.19] |   -7.11 | < .001
+leftright                |       0.29 | 0.02 | [ 0.26,  0.33] |   16.47 | < .001
+education                |      -0.11 | 0.02 | [-0.15, -0.08] |   -6.17 | < .001
+sex                      |   9.02e-03 | 0.02 | [-0.03,  0.04] |    0.51 | 0.610 
+eastwest                 |       0.09 | 0.03 | [ 0.04,  0.14] |    3.63 | < .001
+
+Linear hypothesis test
+
+Hypothesis:
+attacks_6_50_p100k - attacks_after_6_50_p100k = 0
+
+Model 1: restricted model
+Model 2: ref_risk ~ attacks_6_50_p100k + attacks_after_6_50_p100k + einwohner + 
+    mc11 + leftright + education + sex + eastwest + (1 | ags)
+
+  Df  Chisq Pr(>Chisq)
+1                     
+2  1 1.2574     0.2621
+
+coef difference: -0.0104038472022717 
+
+VIF:
+
+      attacks_6_50_p100k attacks_after_6_50_p100k                einwohner                     mc11 
+               12.697004                13.220785                 1.160824                 1.034472 
+               leftright                education                      sex                 eastwest 
+                1.024719                 1.046771                 1.020281                 1.371681 
+
+
+=========================================================================
+Log End Time: 2022-06-15 17:39:05
+Log Elapsed Time: 0 00:04:40
+=========================================================================
